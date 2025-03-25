@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: ap-northeast-2
-  ECR_REPOSITORY: aws-cicd
+  ECR_REPOSITORY: acc-cicd
 
 jobs:
   deploy:
