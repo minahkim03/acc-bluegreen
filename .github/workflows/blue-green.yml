@@ -1,0 +1,85 @@
+name: Deploy to AWS ECR with Blue-Green
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: fastapi-cicd
+  IMAGE_TAG: latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push Docker image to ECR
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+
+      - name: Deploy to EC2 and switch Nginx
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+
+            # 로그인
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            # 현재 활성 버전 확인 (blue or green)
+            CURRENT_VERSION=$(docker ps --format '{{.Names}}' | grep fastapi- | grep -o 'blue\|green' || echo "none")
+
+            if [ "$CURRENT_VERSION" == "blue" ]; then
+              NEXT_VERSION="green"
+              PORT="8002"
+              COMPOSE_FILE="docker-compose.green.yml"
+            else
+              NEXT_VERSION="blue"
+              PORT="8001"
+              COMPOSE_FILE="docker-compose.blue.yml"
+            fi
+
+            # Pull 이미지
+            docker pull $IMAGE_URI
+
+            # 최신 docker-compose 파일로 실행
+            cd ~/app  # EC2에 app이 clone 되어 있다고 가정
+            docker-compose -f $COMPOSE_FILE up -d --force-recreate
+
+            # health check (간단한 버전)
+            sleep 5
+            curl --fail http://localhost:$PORT/ || (echo "Health check failed!" && exit 1)
+
+            # nginx 설정 스위치
+            ./switch_version.sh $NEXT_VERSION
+
+            # 이전 버전 종료
+            if [ "$CURRENT_VERSION" != "none" ]; then
+              docker stop fastapi-$CURRENT_VERSION
+              docker rm fastapi-$CURRENT_VERSION
+            fi
+
+            echo "Switched traffic to $NEXT_VERSION"
