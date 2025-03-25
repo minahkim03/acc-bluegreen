@@ -4,4 +4,8 @@ app = FastAPI()
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from ECR CICD FastAPI!"}
+    return {"message": "root api"}
+
+@app.get("/acc")
+def read_root():
+    return {"message": "acc api"}
